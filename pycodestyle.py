@@ -295,9 +295,10 @@ def maximum_line_length(physical_line, max_line_length, multiline,
         # comments, but still report the error when the 72 first chars
         # are whitespaces.
         chunks = line.split()
-        if ((len(chunks) == 1 and multiline) or
-            (len(chunks) == 2 and chunks[0] == '#')) and \
-                len(line) - len(chunks[-1]) < max_line_length - 7:
+        len_chunks = len(chunks)
+        if ((len_chunks == 1 and multiline) or
+            (len_chunks == 2 and chunks[0] == '#')) and \
+                length - len(chunks[-1]) < max_line_length - 7:
             return
         if length > max_line_length:
             return (max_line_length, "E501 line too long "
@@ -406,8 +407,9 @@ def blank_lines(logical_line, blank_lines, indent_level, line_number,
                 # Search backwards for a def ancestor or tree root
                 # (top level).
                 for line in lines[line_number - top_level_lines::-1]:
-                    if line.strip() and expand_indent(line) < ancestor_level:
-                        ancestor_level = expand_indent(line)
+                    line_indents = expand_indent(line)
+                    if line.strip() and line_indents < ancestor_level:
+                        ancestor_level = line_indents
                         nested = STARTSWITH_DEF_REGEX.match(line.lstrip())
                         if nested or ancestor_level == 0:
                             break
@@ -786,7 +788,7 @@ def whitespace_before_parameters(logical_line, tokens):
     E211: dict['key'] = list [index]
     """
     prev_type, prev_text, __, prev_end, __ = tokens[0]
-    for index in range(1, len(tokens)):
+    for index, _ in enumerate(tokens):
         token_type, text, start, end, __ = tokens[index]
         if (
             token_type == tokenize.OP and
@@ -1160,6 +1162,14 @@ def imports_on_separate_lines(logical_line):
             yield found, "E401 multiple imports on one line"
 
 
+def is_string_literal(line):
+    if line[0] in 'uUbB':
+        line = line[1:]
+    if line and line[0] in 'rR':
+        line = line[1:]
+    return line and (line[0] == '"' or line[0] == "'")
+
+
 @register_check
 def module_imports_on_top_of_file(
         logical_line, indent_level, checker_state, noqa):
@@ -1178,12 +1188,6 @@ def module_imports_on_top_of_file(
 
     Okay: if x:\n    import os
     """  # noqa
-    def is_string_literal(line):
-        if line[0] in 'uUbB':
-            line = line[1:]
-        if line and line[0] in 'rR':
-            line = line[1:]
-        return line and (line[0] == '"' or line[0] == "'")
 
     allowed_keywords = (
         'try', 'except', 'else', 'finally', 'with', 'if', 'elif')
@@ -1576,7 +1580,8 @@ def ambiguous_identifier(logical_line, tokens):
     brace_depth = 0
     idents_to_avoid = ('l', 'O', 'I')
     prev_type, prev_text, prev_start, prev_end, __ = tokens[0]
-    for index in range(1, len(tokens)):
+    len_tokens = len(tokens)
+    for index in range(1, len_tokens):
         token_type, text, start, end, line = tokens[index]
         ident = pos = None
         # find function definitions
@@ -1601,30 +1606,53 @@ def ambiguous_identifier(logical_line, tokens):
                 pos = prev_start
         # identifiers bound to values with 'as', 'for',
         # 'global', or 'nonlocal'
-        if prev_text in ('as', 'for', 'global', 'nonlocal'):
-            if text in idents_to_avoid:
-                ident = text
-                pos = start
+        if prev_text in ('as', 'for', 'global', 'nonlocal') and \
+                text in idents_to_avoid:
+            ident = text
+            pos = start
         # function / lambda parameter definitions
         if (
                 func_depth is not None and
                 not seen_colon and
-                index < len(tokens) - 1 and tokens[index + 1][1] in ':,=)' and
+                index < len_tokens - 1 and tokens[index + 1][1] in ':,=)' and
                 prev_text in {'lambda', ',', '*', '**', '('} and
                 text in idents_to_avoid
         ):
             ident = text
             pos = start
-        if prev_text == 'class':
-            if text in idents_to_avoid:
-                yield start, "E742 ambiguous class definition '%s'" % text
-        if prev_text == 'def':
-            if text in idents_to_avoid:
-                yield start, "E743 ambiguous function definition '%s'" % text
+        if prev_text == 'class' and \
+                text in idents_to_avoid:
+            yield start, "E742 ambiguous class definition '%s'" % text
+        if prev_text == 'def' and \
+                text in idents_to_avoid:
+            yield start, "E743 ambiguous function definition '%s'" % text
         if ident:
             yield pos, "E741 ambiguous variable name '%s'" % ident
         prev_text = text
         prev_start = start
+
+
+# https://docs.python.org/3/reference/lexical_analysis.html#string-and-bytes-literals
+python_3000_valid = frozenset([
+    '\n',
+    '\\',
+    '\'',
+    '"',
+    'a',
+    'b',
+    'f',
+    'n',
+    'r',
+    't',
+    'v',
+    '0', '1', '2', '3', '4', '5', '6', '7',
+    'x',
+
+    # Escape sequences only recognized in string literals
+    'N',
+    'u',
+    'U',
+])
 
 
 @register_check
@@ -1637,27 +1665,7 @@ def python_3000_invalid_escape_sequence(logical_line, tokens, noqa):
     if noqa:
         return
 
-    # https://docs.python.org/3/reference/lexical_analysis.html#string-and-bytes-literals
-    valid = [
-        '\n',
-        '\\',
-        '\'',
-        '"',
-        'a',
-        'b',
-        'f',
-        'n',
-        'r',
-        't',
-        'v',
-        '0', '1', '2', '3', '4', '5', '6', '7',
-        'x',
-
-        # Escape sequences only recognized in string literals
-        'N',
-        'u',
-        'U',
-    ]
+    valid = python_3000_valid
 
     prefixes = []
     for token_type, text, start, _, _ in tokens:
@@ -1701,11 +1709,13 @@ def maximum_doc_length(logical_line, max_doc_length, noqa, tokens):
         return
 
     prev_token = None
-    skip_lines = set()
+    lines_to_skip = SKIP_COMMENTS.union([tokenize.STRING])
+    skip_lines = False
     # Skip lines that
     for token_type, text, start, end, line in tokens:
-        if token_type not in SKIP_COMMENTS.union([tokenize.STRING]):
-            skip_lines.add(line)
+        if token_type not in lines_to_skip:
+            skip_lines = True
+            break
 
     for token_type, text, start, end, line in tokens:
         # Skip lines that aren't pure strings
@@ -1715,19 +1725,22 @@ def maximum_doc_length(logical_line, max_doc_length, noqa, tokens):
             # Only check comment-only lines
             if prev_token is None or prev_token in SKIP_TOKENS:
                 lines = line.splitlines()
+                lines_len = len(lines)
                 for line_num, physical_line in enumerate(lines):
                     if start[0] + line_num == 1 and line.startswith('#!'):
                         return
                     length = len(physical_line)
                     chunks = physical_line.split()
-                    if token_type == tokenize.COMMENT:
-                        if (len(chunks) == 2 and
-                                length - len(chunks[-1]) < MAX_DOC_LENGTH):
-                            continue
-                    if len(chunks) == 1 and line_num + 1 < len(lines):
-                        if (len(chunks) == 1 and
-                                length - len(chunks[-1]) < MAX_DOC_LENGTH):
-                            continue
+                    len_chunks = len(chunks)
+                    len_last_chunk = len(chunks[-1]) if chunks else None
+                    if token_type == tokenize.COMMENT and \
+                        (len_chunks == 2 and
+                            length - len_last_chunk < MAX_DOC_LENGTH):
+                        continue
+                    if len_chunks == 1 and line_num + 1 < lines_len and \
+                            (len_chunks == 1 and
+                                length - len_last_chunk < MAX_DOC_LENGTH):
+                        continue
                     if length > max_doc_length:
                         doc_error = (start[0] + line_num, max_doc_length)
                         yield (doc_error, "W505 doc line too long "
@@ -2145,17 +2158,16 @@ class Checker:
                     parens += 1
                 elif text in '}])':
                     parens -= 1
-            elif not parens:
-                if token_type in NEWLINE:
-                    if token_type == tokenize.NEWLINE:
-                        self.check_logical()
-                        self.blank_before = 0
-                    elif len(self.tokens) == 1:
-                        # The physical line contains only this token.
-                        self.blank_lines += 1
-                        del self.tokens[0]
-                    else:
-                        self.check_logical()
+            elif not parens and token_type in NEWLINE:
+                if token_type == tokenize.NEWLINE:
+                    self.check_logical()
+                    self.blank_before = 0
+                elif len(self.tokens) == 1:
+                    # The physical line contains only this token.
+                    self.blank_lines += 1
+                    del self.tokens[0]
+                else:
+                    self.check_logical()
         if self.tokens:
             self.check_physical(self.lines[-1])
             self.check_logical()
