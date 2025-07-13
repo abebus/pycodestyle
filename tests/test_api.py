@@ -337,6 +337,7 @@ class APITestCase(unittest.TestCase):
                 "stdin:1:1: E901 SyntaxError: source code string cannot contain null bytes",   # noqa: E501
                 "stdin:1:1: E901 TokenError: source code cannot contain null bytes",   # noqa: E501
             ]
+        # TODO: find out why pypy-7.3.19-final changes this behaviour  
         self.assertEqual(stdout.splitlines().sort(), expected.sort())
         self.assertFalse(sys.stderr.getvalue())
         self.assertEqual(count_errors, len(expected))
