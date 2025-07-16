@@ -168,6 +168,7 @@ else:  # pragma: <3.14 cover
 
 OPENING_BRACES = frozenset('{[(')
 CLOSING_BRACES = frozenset('}])')
+NEWLINE_CHARS = '\r\n\x0c'
 
 _checks = {'physical_line': {}, 'logical_line': {}, 'tree': {}}
 
@@ -234,6 +235,9 @@ def tabs_obsolete(physical_line):
         return indent.index('\t'), "W191 indentation contains tabs"
 
 
+_CHARS_TO_STRIP = ' \t\v'
+
+
 @register_check
 def trailing_whitespace(physical_line):
     r"""Trailing whitespace is superfluous.
@@ -249,8 +253,8 @@ def trailing_whitespace(physical_line):
     # - chr(10), newline
     # - chr(13), carriage return
     # - chr(12), form feed, ^L
-    physical_line = physical_line.rstrip('\n\r\x0c')
-    stripped = physical_line.rstrip(' \t\v')
+    physical_line = physical_line.rstrip(NEWLINE_CHARS)
+    stripped = physical_line.rstrip(_CHARS_TO_STRIP)
     if physical_line != stripped:
         if stripped:
             return len(stripped), "W291 trailing whitespace"
@@ -268,7 +272,7 @@ def trailing_blank_lines(physical_line, lines, line_number, total_lines):
     However the last line should end with a new line (warning W292).
     """
     if line_number == total_lines:
-        stripped_last_line = physical_line.rstrip('\r\n')
+        stripped_last_line = physical_line.rstrip(NEWLINE_CHARS)
         if physical_line and not stripped_last_line:
             return 0, "W391 blank line at end of file"
         if stripped_last_line == physical_line:
@@ -293,7 +297,10 @@ def maximum_line_length(physical_line, max_line_length, multiline,
     length = len(line)
     if length > max_line_length and not noqa:
         # Special case: ignore long shebang lines.
-        if line_number == 1 and line.startswith('#!'):
+        if (line_number == 1 and
+                length >= 2 and
+                line[0] == '#' and
+                line[1] == '!'):
             return
         # Special case for long URLs in multi-line docstrings or
         # comments, but still report the error when the 72 first chars
@@ -529,7 +536,7 @@ def missing_whitespace_after_keyword(logical_line, tokens):
                 tok0.string not in SINGLETONS and
                 not (tok0.string == 'except' and tok1.string == '*') and
                 not (tok0.string == 'yield' and tok1.string == ')') and
-                (tok1.string not in ':\n')):
+                (tok1.string and tok1.string != ':' and tok1.string != '\n')):
             yield tok0.end, "E275 missing whitespace after keyword"
 
 
@@ -761,9 +768,9 @@ def continued_indentation(logical_line, tokens, indent_level, hang_closing,
                 for d in range(depth):
                     if indent[d] > prev_indent:
                         indent[d] = 0
-                for ind in list(indent_chances):
+                for ind in indent_chances.keys():
                     if ind >= prev_indent:
-                        del indent_chances[ind]
+                        indent_chances[ind] = False
                 del open_rows[depth + 1:]
                 depth -= 1
                 if depth:
@@ -853,6 +860,9 @@ def whitespace_around_operator(logical_line):
             yield match.start(2), "E222 multiple spaces after operator"
 
 
+_POW_OP = _KWARGS_UNPACK = '**'
+
+
 @register_check
 def missing_whitespace(logical_line, tokens):
     r"""Surround operators with the correct amount of whitespace.
@@ -929,7 +939,7 @@ def missing_whitespace(logical_line, tokens):
                                           text == ';' or
                                           text == ':'):
             next_char = line[end[1]:end[1] + 1]
-            if next_char not in WHITESPACE and next_char not in "\r\n":
+            if next_char not in WHITESPACE and next_char not in NEWLINE_CHARS:
                 # slice
                 if text == ":" and \
                         len(brace_stack) >= 1 and brace_stack[-1] == "[":
@@ -977,7 +987,7 @@ def missing_whitespace(logical_line, tokens):
                 if need_space is True or need_space[1]:
                     # A needed trailing space was not found
                     yield prev_end, "E225 missing whitespace around operator"
-                elif prev_text != '**':
+                elif prev_text != _POW_OP:
                     code, optype = 'E226', 'arithmetic'
                     if prev_text == '%':
                         code, optype = 'E228', 'modulo'
@@ -1165,7 +1175,7 @@ def whitespace_before_comment(logical_line, tokens):
             symbol, _, comment = text.partition(' ')
             bad_prefix = symbol not in '#:' and (symbol.lstrip('#')[:1] or '#')
             if inline_comment:
-                if bad_prefix or comment[0] in WHITESPACE:
+                if bad_prefix or comment and comment[0] in WHITESPACE:
                     yield start, "E262 inline comment should start with '# '"
             elif bad_prefix and (bad_prefix != '!' or start[0] > 1):
                 if bad_prefix != '#':
@@ -1351,7 +1361,7 @@ def explicit_line_join(logical_line, tokens):
         if start[0] != prev_start:
             comment = False  # Reset comment flag on newline
         if end[0] != prev_end:
-            if line.rstrip('\r\n').endswith('\\'):
+            if line.rstrip(NEWLINE_CHARS).endswith('\\'):
                 backslash = (end[0], len(line.splitlines()[-1]) - 1)
             else:
                 backslash = None
@@ -1371,7 +1381,6 @@ def explicit_line_join(logical_line, tokens):
 _SYMBOLIC_OPS = frozenset("()[]{},:.;@=%~") | frozenset(("...",))
 
 
-@lru_cache(8)
 def _is_binary_operator(token_type, text):
     return (
         token_type == tokenize.OP or
@@ -1379,6 +1388,9 @@ def _is_binary_operator(token_type, text):
     ) and (
         text not in _SYMBOLIC_OPS
     )
+
+
+_UNARY_CONTEXT_SYMBOLS = frozenset(('(', '[', '{', ',', ';'))
 
 
 def _break_around_binary_operators(tokens):
@@ -1396,12 +1408,13 @@ def _break_around_binary_operators(tokens):
     for token_type, text, start, _, _ in tokens:
         if token_type == tokenize.COMMENT:
             continue
-        if ('\n' in text or '\r' in text) and token_type != tokenize.STRING:
+        if token_type != tokenize.STRING and \
+                any(map(str.isspace, text)):
             line_break = True
         else:
             yield (token_type, text, previous_token_type, previous_text,
                    line_break, unary_context, start)
-            unary_context = text in {'(', '[', '{', ',', ';'}
+            unary_context = text in _UNARY_CONTEXT_SYMBOLS
             line_break = False
             previous_token_type = token_type
             previous_text = text
@@ -1427,11 +1440,16 @@ def break_before_binary_operator(logical_line, tokens):
     Okay: foo(x,\n    -y)
     Okay: foo(x,  # comment\n    -y)
     """
-    for context in _break_around_binary_operators(tokens):
-        (token_type, text, previous_token_type, previous_text,
-         line_break, unary_context, start) = context
-        if (_is_binary_operator(token_type, text) and line_break and
+    for (token_type,
+         text,
+         previous_token_type,
+         previous_text,
+         line_break,
+         unary_context,
+         start) in _break_around_binary_operators(tokens):
+        if (line_break and
                 not unary_context and
+                _is_binary_operator(token_type, text) and
                 not _is_binary_operator(previous_token_type,
                                         previous_text)):
             yield start, "W503 line break before binary operator"
@@ -1461,12 +1479,16 @@ def break_after_binary_operator(logical_line, tokens):
     Okay: var = (1 +\n       -1 +\n       -2)
     """
     prev_start = None
-    for context in _break_around_binary_operators(tokens):
-        (token_type, text, previous_token_type, previous_text,
-         line_break, unary_context, start) = context
-        if (_is_binary_operator(previous_token_type, previous_text) and
-                line_break and
+    for (token_type,
+         text,
+         previous_token_type,
+         previous_text,
+         line_break,
+         unary_context,
+         start) in _break_around_binary_operators(tokens):
+        if (line_break and
                 not unary_context and
+                _is_binary_operator(previous_token_type, previous_text) and
                 not _is_binary_operator(token_type, text)):
             yield prev_start, "W504 line break after binary operator"
         prev_start = start
@@ -1656,7 +1678,7 @@ def ambiguous_identifier(logical_line, tokens):
                 not seen_colon and
                 index < len_tokens - 1 and
                 tokens[index + 1][1] in {':', ',', '=', ')'} and
-                prev_text in {'lambda', ',', '*', '**', '('} and
+                prev_text in {'lambda', ',', '*', _KWARGS_UNPACK, '('} and
                 text in _AMBIGUOUS_IDENTIFIERS_TO_AVOID
         ):
             ident = text
@@ -1823,7 +1845,7 @@ def expand_indent(line):
 
     Tabs are expanded to the next multiple of 8.
     """
-    line = line.rstrip('\n\r')
+    line = line.rstrip(NEWLINE_CHARS)
     if '\t' not in line:
         return len(line) - len(line.lstrip())
     result = 0
